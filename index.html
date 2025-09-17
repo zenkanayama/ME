@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ブロック崩し (Breakout)</title>
+  <style>
+    :root{--bg:#0b1220;--panel:#0f1724;--accent:#ffd166;--muted:#9aa4b2}
+    html,body{height:100%;margin:0;font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", Arial;color:#e6eef6;background:linear-gradient(180deg,#071022 0%, #07122a 100%);display:flex;align-items:center;justify-content:center}
+    .wrap{width:min(980px,96vw);background:linear-gradient(180deg,var(--panel),#071127);border-radius:12px;padding:18px;box-shadow:0 10px 30px rgba(2,6,23,0.6);}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+    h1{font-size:18px;margin:0;color:var(--accent)}
+    .controls{display:flex;gap:8px;align-items:center}
+    button{background:transparent;border:1px solid rgba(255,255,255,0.06);color:#dfe9f8;padding:6px 10px;border-radius:8px;cursor:pointer}
+    button:active{transform:scale(0.99)}
+    #gameCanvas{display:block;width:100%;height:520px;background:linear-gradient(180deg,#061223,#07122a);border-radius:8px}
+    .hud{display:flex;gap:14px;align-items:center;margin-top:10px;color:var(--muted)}
+    .hint{font-size:13px;color:#9fb0c8}
+    @media (max-width:600px){#gameCanvas{height:380px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>ブロック崩し</h1>
+      <div class="controls">
+        <button id="startBtn">スタート</button>
+        <button id="pauseBtn">一時停止</button>
+        <button id="resetBtn">リセット</button>
+      </div>
+    </header>
+
+    <canvas id="gameCanvas" width="960" height="520"></canvas>
+
+    <div class="hud">
+      <div id="score">スコア: 0</div>
+      <div id="lives">残り: 3</div>
+      <div id="level">レベル: 1</div>
+      <div style="flex:1"></div>
+      <div class="hint">← → またはドラッグで操作 / タップで開始</div>
+    </div>
+  </div>
+
+<script>
+// ---- 設定 ----
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+let cw = canvas.width, ch = canvas.height;
+
+// HUD
+const scoreEl = document.getElementById('score');
+const livesEl = document.getElementById('lives');
+const levelEl = document.getElementById('level');
+
+const startBtn = document.getElementById('startBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const resetBtn = document.getElementById('resetBtn');
+
+// game state
+let running = false;
+let paused = false;
+let score = 0;
+let lives = 3;
+let level = 1;
+
+// paddle
+const paddle = {w:120,h:14,x: (cw-120)/2,y: ch-46,speed: 10};
+// ball
+const ball = {r:9,x:cw/2,y:ch/2,dx:4,dy:-4,speed:1.0};
+
+// bricks
+const brick = {rows:5,cols:9,w:86,h:20,padding:10,offsetTop:60,offsetLeft:36};
+let bricks = [];
+
+// touch/mouse
+let pointerX = paddle.x + paddle.w/2;
+let dragging = false;
+
+// キー状態
+let keys = { left: false, right: false };
+
+// 音 (短い効果音をWebAudioで作る)
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function beep(freq, duration=0.03){
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine'; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.15, audioCtx.currentTime + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + duration);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + duration);
+}
+
+// 初期化
+function initBricks(){
+  bricks = [];
+  for(let r=0;r<brick.rows;r++){
+    bricks[r]=[];
+    for(let c=0;c<brick.cols;c++){
+      bricks[r][c] = {x:0,y:0,status:1, hits: 1};
+    }
+  }
+}
+
+function resetGame(){
+  score = 0; lives = 3; level = 1; ball.speed = 1.0; initBricks(); resetBall(); updateHUD();
+}
+
+function resetBall(){
+  ball.x = cw/2; ball.y = ch/2; ball.dx = 4 * (Math.random()>0.5?1:-1); ball.dy = -4;
+}
+
+function updateHUD(){
+  scoreEl.textContent = `スコア: ${score}`;
+  livesEl.textContent = `残り: ${lives}`;
+  levelEl.textContent = `レベル: ${level}`;
+}
+
+// レンダリング
+function draw(){
+  ctx.clearRect(0,0,cw,ch);
+  // 背景グラデ
+  const g = ctx.createLinearGradient(0,0,0,ch);
+  g.addColorStop(0,'#071223'); g.addColorStop(1,'#041223');
+  ctx.fillStyle = g; ctx.fillRect(0,0,cw,ch);
+
+  // bricks
+  for(let r=0;r<brick.rows;r++){
+    for(let c=0;c<brick.cols;c++){
+      const b = bricks[r][c];
+      if(b.status){
+        const bx = (c*(brick.w+brick.padding))+brick.offsetLeft;
+        const by = (r*(brick.h+brick.padding))+brick.offsetTop;
+        b.x = bx; b.y = by;
+        // 色を行で変える
+        const hue = 30 + r*16 + (level-1)*6;
+        ctx.fillStyle = `hsl(${hue} 80% 55%)`;
+        roundRect(ctx,bx,by,brick.w,brick.h,6,true,false);
+        // inner shine
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(bx+6, by+4, brick.w-12, 6);
+      }
+    }
+  }
+
+  // paddle
+  roundRect(ctx,paddle.x,paddle.y,paddle.w,paddle.h,8,true,true);
+
+  // ball
+  ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r,0,Math.PI*2); ctx.fillStyle = '#ffd166'; ctx.fill();
+  ctx.closePath();
+
+  // HUD small
+  ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fillRect(0,ch-2,cw,2);
+}
+
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  if(typeof r==='undefined') r=5;
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+  if(fill){ctx.fillStyle='#ff8c00'; ctx.fill();}
+  if(stroke){ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=1; ctx.stroke();}
+}
+
+// 物理と当たり判定
+function update(){
+  if(!running || paused) return;
+
+  // ボール移動
+  ball.x += ball.dx * ball.speed * 0.9;
+  ball.y += ball.dy * ball.speed * 0.9;
+
+  // 壁
+  if(ball.x + ball.r > cw){ ball.x = cw - ball.r; ball.dx *= -1; beep(660); }
+  if(ball.x - ball.r < 0){ ball.x = ball.r; ball.dx *= -1; beep(660); }
+  if(ball.y - ball.r < 0){ ball.y = ball.r; ball.dy *= -1; beep(720); }
+
+  // キー操作処理
+  if (keys.left)  pointerX -= paddle.speed * 1.5;
+  if (keys.right) pointerX += paddle.speed * 1.5;
+
+  // パドル移動（ポインター基準）
+  const target = pointerX - paddle.w/2;
+  paddle.x += (target - paddle.x) * 0.25;
+  if(paddle.x < 6) paddle.x = 6;
+  if(paddle.x + paddle.w > cw - 6) paddle.x = cw - paddle.w - 6;
+
+  // パドル当たり
+  if(ball.y + ball.r >= paddle.y && ball.y + ball.r <= paddle.y + paddle.h && ball.x >= paddle.x && ball.x <= paddle.x + paddle.w){
+    const collidePoint = (ball.x - (paddle.x + paddle.w/2)) / (paddle.w/2);
+    const angle = collidePoint * (Math.PI/3);
+    const speed = Math.sqrt(ball.dx*ball.dx + ball.dy*ball.dy);
+    ball.dx = speed * Math.sin(angle);
+    ball.dy = -Math.abs(speed * Math.cos(angle));
+    ball.speed += 0.04;
+    beep(880,0.04);
+  }
+
+  // ブロック当たり
+  outer: for(let r=0;r<brick.rows;r++){
+    for(let c=0;c<brick.cols;c++){
+      const b = bricks[r][c];
+      if(b.status){
+        if(ball.x > b.x && ball.x < b.x + brick.w && ball.y - ball.r < b.y + brick.h && ball.y + ball.r > b.y){
+          ball.dy *= -1;
+          b.status = 0;
+          score += 10;
+          beep(1000,0.03);
+          updateHUD();
+          break outer;
+        }
+      }
+    }
+  }
+
+  // 画面外（落下）
+  if(ball.y - ball.r > ch){
+    lives -= 1; updateHUD();
+    beep(220,0.08);
+    if(lives <= 0){
+      running = false;
+      setTimeout(()=> alert(`ゲームオーバー\nスコア: ${score}`), 50);
+    }else{
+      resetBall();
+    }
+  }
+
+  // レベルクリア
+  if(bricks.flat().every(b=>b.status===0)){
+    level += 1; updateHUD();
+    if(brick.rows < 8) brick.rows += 1;
+    ball.speed = 1.0; resetBall(); initBricks();
+    beep(1200,0.12);
+  }
+}
+
+// メインループ
+function loop(){
+  update(); draw();
+  requestAnimationFrame(loop);
+}
+
+// キーボード
+window.addEventListener('keydown', (e)=>{
+  if(e.key === 'ArrowLeft') keys.left = true;
+  if(e.key === 'ArrowRight') keys.right = true;
+  if(e.key === ' ') togglePause();
+});
+
+window.addEventListener('keyup', (e)=>{
+  if(e.key === 'ArrowLeft') keys.left = false;
+  if(e.key === 'ArrowRight') keys.right = false;
+});
+
+// マウス / タッチ
+canvas.addEventListener('mousemove', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  pointerX = (e.clientX - rect.left) * (cw/rect.width);
+});
+
+canvas.addEventListener('pointerdown', (e)=>{
+  const rect = canvas.getBoundingClientRect();
+  pointerX = (e.clientX - rect.left) * (cw/rect.width);
+  dragging = true;
+  if(!running) startGame();
+});
+canvas.addEventListener('pointermove', (e)=>{
+  if(!dragging) return;
+  const rect = canvas.getBoundingClientRect();
+  pointerX = (e.clientX - rect.left) * (cw/rect.width);
+});
+canvas.addEventListener('pointerup', ()=>{ dragging = false; });
+canvas.addEventListener('touchstart',(e)=>{e.preventDefault(); const t=e.touches[0]; const rect=canvas.getBoundingClientRect(); pointerX=(t.clientX-rect.left)*(cw/rect.width); if(!running) startGame(); },{passive:false});
+canvas.addEventListener('touchmove',(e)=>{e.preventDefault(); const t=e.touches[0]; const rect=canvas.getBoundingClientRect(); pointerX=(t.clientX-rect.left)*(cw/rect.width); },{passive:false});
+
+// ボタン
+startBtn.addEventListener('click', ()=> startGame());
+pauseBtn.addEventListener('click', ()=> togglePause());
+resetBtn.addEventListener('click', ()=>{ resetGame(); running=false; paused=false; });
+
+function startGame(){ if(!running){ running=true; paused=false; updateHUD(); } }
+function togglePause(){ if(!running) return; paused = !paused; pauseBtn.textContent = paused? '再開':'一時停止'; }
+
+// 初期処理
+initBricks(); resetBall(); updateHUD(); loop();
+
+window.__breakout = {resetGame, startGame, pause: ()=>{paused=true}, resume: ()=>{paused=false}, bricksInfo: ()=>brick};
+
+</script>
+</body>
+</html>
